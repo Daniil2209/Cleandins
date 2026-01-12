@@ -35,6 +35,581 @@ const workingHours = {
     '6': { start: 13.5, end: 18.5, label: 'Saturday: 1:30 PM - 6:30 PM' } // Saturday
 };
 
+// Helper function to convert time string to decimal hours
+function parseTimeToDecimal(timeStr) {
+    const [time, period] = timeStr.split(' ');
+    const [hours, minutes] = time.split(':').map(Number);
+    let decimalHours = hours + minutes / 60;
+    
+    if (period === 'PM' && hours !== 12) {
+        decimalHours += 12;
+    }
+    if (period === 'AM' && hours === 12) {
+        decimalHours -= 12;
+    }
+    
+    return decimalHours;
+}
+
+// Helper function to get working hours for a day
+function getWorkingHoursForDay(dayOfWeek) {
+    return workingHours[dayOfWeek.toString()] || workingHours['1']; // Default to Monday hours
+}
+
+// Time slot generation
+function generateTimeSlotsForDay(dayOfWeek) {
+    const hours = workingHours[dayOfWeek.toString()];
+    if (!hours) return [];
+    
+    const slots = [];
+    let currentTime = hours.start;
+    
+    while (currentTime < hours.end) {
+        const hour = Math.floor(currentTime);
+        const minute = (currentTime % 1) * 60;
+        const period = hour >= 12 ? 'PM' : 'AM';
+        const displayHour = hour > 12 ? hour - 12 : hour === 0 ? 12 : hour;
+        const timeString = `${displayHour}:${minute === 0 ? '00' : '30'} ${period}`;
+        slots.push(timeString);
+        currentTime += 0.5; // 30 minute intervals
+    }
+    
+    return slots;
+}
+
+// Calculate service duration and price
+function calculateServiceDetails(binCount, serviceType) {
+    // Базовая цена за 2 бака
+    const basePrice = services[serviceType].basePrice;
+    const baseBins = 2;
+    
+    // Рассчитываем дополнительные баки
+    const extraBins = Math.max(0, binCount - baseBins);
+    const extraCost = extraBins * 15; // $15 за каждый дополнительный бак
+    
+    // Рассчитываем общую цену
+    const totalPrice = basePrice + extraCost;
+    
+    // Рассчитываем длительность:
+    // 2 бака = 1 час (2 слота по 30 минут)
+    // 3-4 бака = 1.5 часа (3 слота)
+    // 5-6 баков = 2 часа (4 слота)
+    let duration;
+    let durationText;
+    
+    if (binCount <= 2) {
+        duration = 2; // 1 час
+        durationText = "1 hour";
+    } else if (binCount <= 4) {
+        duration = 3; // 1.5 часа
+        durationText = "1.5 hours";
+    } else if (binCount <= 6) {
+        duration = 4; // 2 часа
+        durationText = "2 hours";
+    } else {
+        duration = 4; // максимум 6 баков
+        durationText = "2 hours";
+    }
+    
+    return {
+        extraBins,
+        extraCost,
+        totalPrice,
+        duration,
+        durationText,
+        durationHours: duration * 0.5 // каждый слот = 0.5 часа
+    };
+}
+
+// Check slot availability
+function checkSlotsAvailability(date, time, duration) {
+    const dateObj = new Date(date);
+    const dayOfWeek = dateObj.getDay();
+    const timeSlots = generateTimeSlotsForDay(dayOfWeek);
+    const timeIndex = timeSlots.indexOf(time);
+    
+    if (timeIndex === -1) {
+        return { available: false, reason: 'Invalid time slot!' };
+    }
+    
+    // Проверяем, что выбранное время + продолжительность вписывается в рабочий день
+    const workingHours = getWorkingHoursForDay(dayOfWeek);
+    const totalMinutes = duration * 30; // каждый слот = 30 минут
+    const startHour = parseTimeToDecimal(time);
+    
+    if (startHour + (totalMinutes / 60) > workingHours.end) {
+        return { available: false, reason: 'Service duration exceeds working hours!' };
+    }
+    
+    // Получаем существующие бронирования на эту дату
+    const dateBookings = bookings.filter(booking => 
+        booking.date === date && booking.status !== 'cancelled'
+    );
+    
+    // Проверяем все требуемые слоты
+    for (let i = 0; i < duration; i++) {
+        const slotIndex = timeIndex + i;
+        
+        // Проверяем, что слот существует
+        if (slotIndex >= timeSlots.length) {
+            return { available: false, reason: 'Not enough time available for this service!' };
+        }
+        
+        const slot = timeSlots[slotIndex];
+        
+        // Проверяем, не забронирован ли слот
+        const isSlotBooked = dateBookings.some(booking => {
+            const bookingTimeIndex = timeSlots.indexOf(booking.time);
+            if (bookingTimeIndex === -1) return false;
+            
+            const bookingDuration = calculateServiceDetails(booking.totalBins, booking.service).duration;
+            
+            // Слот занят, если он попадает в диапазон бронирования
+            for (let j = 0; j < bookingDuration; j++) {
+                if (bookingTimeIndex + j === slotIndex) {
+                    return true;
+                }
+            }
+            return false;
+        });
+        
+        if (isSlotBooked) {
+            return { 
+                available: false, 
+                reason: `Time slot ${slot} is already booked!`,
+                conflictingSlot: slot
+            };
+        }
+    }
+    
+    return { available: true };
+}
+
+// Initialize
+document.addEventListener('DOMContentLoaded', function() {
+    showPage('home', false);
+    loadStatistics();
+    loadReviews();
+    setupBookingListeners();
+    setupScrollHandlers();
+});
+
+// Scroll Handlers
+function setupScrollHandlers() {
+    let lastScrollTop = 0;
+    const header = document.querySelector('header');
+    const backToTop = document.querySelector('.back-to-top');
+    
+    window.addEventListener('scroll', function() {
+        // Hide/show header on scroll
+        const scrollTop = window.pageYOffset || document.documentElement.scrollTop;
+        
+        if (scrollTop > lastScrollTop && scrollTop > 100) {
+            // Scrolling down
+            header.classList.add('hidden');
+        } else {
+            // Scrolling up
+            header.classList.remove('hidden');
+        }
+        
+        lastScrollTop = scrollTop <= 0 ? 0 : scrollTop;
+        
+        // Show/hide back to top button
+        if (scrollTop > 300) {
+            backToTop.classList.add('visible');
+        } else {
+            backToTop.classList.remove('visible');
+        }
+    });
+    
+    // Handle mobile menu closing on scroll
+    window.addEventListener('scroll', function() {
+        const navMenu = document.getElementById('navMenu');
+        const mobileMenuBtn = document.getElementById('mobileMenuBtn');
+        if (navMenu.classList.contains('active')) {
+            navMenu.classList.remove('active');
+            mobileMenuBtn.innerHTML = '<i class="fas fa-bars"></i>';
+        }
+    });
+}
+
+// Scroll to top function
+function scrollToTop() {
+    window.scrollTo({
+        top: 0,
+        behavior: 'smooth'
+    });
+}
+
+// Page Navigation
+function showPage(pageId, scrollToTop = true) {
+    // Hide all pages
+    document.querySelectorAll('.page').forEach(page => {
+        page.classList.remove('active');
+    });
+    
+    // Show selected page
+    const page = document.getElementById(pageId);
+    if (page) {
+        page.classList.add('active');
+        
+        if (pageId === 'booking') {
+            initializeBooking();
+        } else if (pageId === 'reviews') {
+            loadReviews();
+        }
+    }
+    
+    // Update active nav link
+    document.querySelectorAll('nav a').forEach(link => {
+        link.classList.remove('active');
+    });
+    
+    document.querySelectorAll('nav a').forEach(link => {
+        if (link.textContent === pageId.charAt(0).toUpperCase() + pageId.slice(1) || 
+            (pageId === 'home' && link.textContent === 'Home')) {
+            link.classList.add('active');
+        }
+    });
+    
+    // Close mobile menu
+    const navMenu = document.getElementById('navMenu');
+    navMenu.classList.remove('active');
+    document.getElementById('mobileMenuBtn').innerHTML = '<i class="fas fa-bars"></i>';
+    
+    // Scroll to top only if explicitly specified
+    if (scrollToTop) {
+        window.scrollTo({
+            top: 0,
+            behavior: 'smooth'
+        });
+    }
+}
+
+// Mobile Menu
+document.getElementById('mobileMenuBtn').addEventListener('click', function() {
+    const navMenu = document.getElementById('navMenu');
+    navMenu.classList.toggle('active');
+    this.innerHTML = navMenu.classList.contains('active') 
+        ? '<i class="fas fa-times"></i>' 
+        : '<i class="fas fa-bars"></i>';
+});
+
+// Notification
+function showNotification(message, isError = false) {
+    const notification = document.getElementById('notification');
+    const messageElement = document.getElementById('notificationMessage');
+    const icon = notification.querySelector('.notification-icon i');
+    
+    messageElement.textContent = message;
+    
+    if (isError) {
+        notification.classList.add('error');
+        icon.className = 'fas fa-exclamation-circle';
+    } else {
+        notification.classList.remove('error');
+        icon.className = 'fas fa-check-circle';
+    }
+    
+    notification.classList.add('show');
+    
+    setTimeout(() => {
+        notification.classList.remove('show');
+    }, 4000);
+}
+
+// Statistics
+function loadStatistics() {
+    const totalBookings = bookings.filter(b => b.status !== 'cancelled').length;
+    const totalReviews = reviews.length;
+    const averageRating = reviews.length > 0 
+        ? (reviews.reduce((sum, review) => sum + review.rating, 0) / reviews.length).toFixed(1)
+        : '0.0';
+    
+    const totalBookingsElement = document.getElementById('totalBookings');
+    const averageRatingElement = document.getElementById('averageRating');
+    
+    if (totalBookingsElement) totalBookingsElement.textContent = totalBookings;
+    if (averageRatingElement) averageRatingElement.textContent = averageRating;
+}
+
+// Reviews
+function loadReviews() {
+    const container = document.getElementById('reviewsGrid');
+    if (!container) return;
+    
+    container.innerHTML = '';
+    
+    if (reviews.length === 0) {
+        container.innerHTML = `
+            <div style="text-align: center; grid-column: 1 / -1; padding: 40px; color: var(--gray);">
+                <i class="fas fa-comments" style="font-size: 3rem; margin-bottom: 20px; opacity: 0.5;"></i>
+                <h3>No Reviews Yet</h3>
+                <p>Be the first to share your experience!</p>
+            </div>
+        `;
+        return;
+    }
+    
+    reviews.slice(0, 6).forEach(review => {
+        const reviewElement = document.createElement('div');
+        reviewElement.className = 'review-card';
+        reviewElement.innerHTML = `
+            <div class="review-header">
+                <div class="review-avatar">${review.name.charAt(0)}</div>
+                <div class="review-info">
+                    <h4>${review.name}</h4>
+                    <div class="review-date">${formatDate(review.date)}</div>
+                </div>
+            </div>
+            <div class="review-rating">
+                ${'★'.repeat(review.rating)}${'☆'.repeat(5 - review.rating)}
+            </div>
+            <div class="review-text">${review.text}</div>
+        `;
+        container.appendChild(reviewElement);
+    });
+}
+
+function submitReview() {
+    const name = document.getElementById('reviewName').value.trim();
+    const rating = document.querySelector('input[name="rating"]:checked');
+    const text = document.getElementById('reviewText').value.trim();
+    
+    if (!name || !rating || !text) {
+        showNotification('Please fill in all fields!', true);
+        return;
+    }
+    
+    const newReview = {
+        id: Date.now(),
+        name: name,
+        rating: parseInt(rating.value),
+        text: text,
+        date: new Date().toISOString()
+    };
+    
+    reviews.push(newReview);
+    localStorage.setItem('cleanbins_reviews', JSON.stringify(reviews));
+    
+    // Clear form
+    document.getElementById('reviewName').value = '';
+    document.querySelectorAll('input[name="rating"]').forEach(radio => radio.checked = false);
+    document.getElementById('reviewText').value = '';
+    
+    // Reload
+    loadReviews();
+    loadStatistics();
+    
+    showNotification('Review submitted successfully!');
+}
+
+// Booking System
+function initializeBooking() {
+    generateCalendar();
+    updateBookingSteps(1);
+    
+    // Reset selections
+    selectedService = null;
+    selectedDate = null;
+    selectedTime = null;
+    
+    document.querySelectorAll('.service-option').forEach(o => {
+        o.style.borderColor = 'var(--gray-border)';
+    });
+    
+    const nextStep2 = document.getElementById('nextStep2');
+    const nextStep3 = document.getElementById('nextStep3');
+    if (nextStep2) nextStep2.disabled = true;
+    if (nextStep3) nextStep3.disabled = true;
+}
+
+function setupBookingListeners() {
+    // Previous/Next month buttons
+    const prevMonth = document.getElementById('prevMonth');
+    const nextMonth = document.getElementById('nextMonth');
+    
+    if (prevMonth) {
+        prevMonth.addEventListener('click', () => {
+            currentMonth--;
+            if (currentMonth < 0) {
+                currentMonth = 11;
+                currentYear--;
+            }
+            generateCalendar();
+        });
+    }
+    
+    if (nextMonth) {
+        nextMonth.addEventListener('click', () => {
+            currentMonth++;
+            if (currentMonth > 11) {
+                currentMonth = 0;
+                currentYear++;
+            }
+            generateCalendar();
+        });
+    }
+}
+
+function generateCalendar() {
+    const calendar = document.getElementById('calendar');
+    const monthYear = document.getElementById('currentMonth');
+    if (!calendar || !monthYear) return;
+    
+    // Clear previous content except headers
+    while (calendar.children.length > 7) {
+        calendar.removeChild(calendar.lastChild);
+    }
+    
+    // Set month/year display
+    const monthNames = ['January', 'February', 'March', 'April', 'May', 'June',
+                       'July', 'August', 'September', 'October', 'November', 'December'];
+    monthYear.textContent = `${monthNames[currentMonth]} ${currentYear}`;
+    
+    // Get first day of month
+    const firstDay = new Date(currentYear, currentMonth, 1).getDay();
+    const daysInMonth = new Date(currentYear, currentMonth + 1, 0).getDate();
+    const today = new Date();
+    
+    // Add empty cells for days before first day
+    for (let i = 0; i < firstDay; i++) {
+        const emptyCell = document.createElement('div');
+        emptyCell.className = 'calendar-date';
+        calendar.appendChild(emptyCell);
+    }
+    
+    // Add days of month
+    for (let day = 1; day <= daysInMonth; day++) {
+        const date = new Date(currentYear, currentMonth, day);
+        const dateElement = document.createElement('div');
+        dateElement.className = 'calendar-date';
+        dateElement.textContent = day;
+        dateElement.dataset.date = date.toISOString().split('T')[0];
+        
+        // Check if date is today
+        if (date.toDateString() === today.toDateString()) {
+            dateElement.classList.add('today');
+        }
+        
+        // Check if date is in the past
+        if (date < today) {
+            dateElement.classList.add('disabled');
+        } else {
+            dateElement.addEventListener('click', () => selectDate(dateElement));
+        }
+        
+        calendar.appendChild(dateElement);
+    }
+}
+
+function selectDate(dateElement) {
+    // Remove selection from all dates
+    document.querySelectorAll('.calendar-date').forEach(date => {
+        date.classList.remove('selected');
+    });
+    
+    // Select clicked date
+    dateElement.classList.add('selected');
+    selectedDate = dateElement.dataset.date;
+    
+    // Enable next button
+    const nextStep2 = document.getElementById('nextStep2');
+    if (nextStep2) nextStep2.disabled = false;
+    
+    // Generate time slots
+    generateTimeSlots(selectedDate);
+}
+
+function generateTimeSlots(date) {
+    const timeSlotsContainer = document.getElementById('timeSlots');
+    if (!timeSlotsContainer) return;
+    
+    timeSlotsContainer.innerHTML = '';
+    
+    // Get day of week (0 = Sunday, 1 = Monday, etc.)
+    const dateObj = new Date(date);
+    const dayOfWeek = dateObj.getDay();
+    
+    // Generate time slots for this day
+    const timeSlots = generateTimeSlotsForDay(dayOfWeek);
+    
+    if (timeSlots.length === 0) {
+        timeSlotsContainer.innerHTML = `
+            <div style="grid-column: 1 / -1; text-align: center; padding: 30px; color: var(--gray);">
+                <i class="fas fa-calendar-times" style="font-size: 2rem; margin-bottom: 10px;"></i>
+                <p>No available time slots for this day</p>
+            </div>
+        `;
+        return;
+    }
+    
+    // Get bookings for this date
+    const dateBookings = bookings.filter(booking => 
+        booking.date === date && booking.status !== 'cancelled'
+    );
+    
+    // Create blocked slots based on existing bookings
+    const blockedSlots = new Set();
+    
+    dateBookings.forEach(booking => {
+        const startTime = booking.time;
+        const serviceDetails = calculateServiceDetails(booking.totalBins, booking.service);
+        const duration = serviceDetails.duration;
+        const startIndex = timeSlots.indexOf(startTime);
+        
+        if (startIndex !== -1) {
+            // Block the booked slot and subsequent slots based on duration
+            for (let i = 0; i < duration; i++) {
+                if (startIndex + i < timeSlots.length) {
+                    blockedSlots.add(timeSlots[startIndex + i]);
+                }
+            }
+        }
+    });
+    
+    // Create time slot elements
+    timeSlots.forEach((slot, index) => {
+        const timeSlotElement = document.createElement('div');
+        timeSlotElement.className = 'time-slot';
+        timeSlotElement.textContent = slot;
+        timeSlotElement.dataset.time = slot;
+        timeSlotElement.dataset.index = index;
+        
+        // Check if slot is blocked
+        if (blockedSlots.has(slot)) {
+            timeSlotElement.classList.add('booked');
+            timeSlotElement.title = 'This time slot is already booked';
+        } else {
+            timeSlotElement.classList.add('available');
+            timeSlotElement.addEventListener('click', () => selectTime(timeSlotElement));
+        }
+        
+        timeSlotsContainer.appendChild(timeSlotElement);
+    });
+}
+
+function selectTime(timeSlotElement) {
+    // Remove selection from all time slots
+    document.querySelectorAll('.time-slot').forEach(slot => {
+        slot.classList.remove('selected');
+    });
+    
+    // Select clicked time slot
+    timeSlotElement.classList.add('selected');
+    selectedTime = timeSlotElement.dataset.time;
+    
+    // Enable next button
+    const nextStep3 = document.getElementById('nextStep3');
+    if (nextStep3) nextStep3.disabled = false;
+    
+    // Show duration and price info
+    showDurationAndPriceInfo();
+}
+
+// Show duration and price information
+function showDurationAndPriceInfo() {
+ 
 // Time slot generation
 function generateTimeSlotsForDay(dayOfWeek) {
     const hours = workingHours[dayOfWeek.toString()];
